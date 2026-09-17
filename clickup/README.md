@@ -4,10 +4,9 @@ Scripts for importing ClickUp tasks into Linear, with comments, metadata and ori
 
 ## Prerequisites
 
-- `curl` for HTTP requests
-- `jq` for JSON parsing
-- `CLICKUP_API_KEY` (get it from https://app.clickup.com/settings/apps)
-- `LINEAR_OAUTH_TOKEN` — see below
+- `curl` and `jq`
+- `CLICKUP_API_KEY` (from https://app.clickup.com/settings/apps)
+- `LINEAR_OAUTH_TOKEN` — an OAuth token, not a personal API key; see below
 
 ### Why OAuth instead of a Linear API key
 
@@ -19,7 +18,7 @@ Set the application up once:
    - The application **name is what appears in "(via …)"** on every imported issue and comment — "ClickUp Import" reads well.
    - Redirect callback URL: `http://localhost:8080/callback`
    - No Linear review is needed to use it in your own workspace, but installing it may require workspace admin rights.
-2. Note the `client_id` and `client_secret`, then run `./get-linear-token.sh` (see below).
+2. Note the `client_id` and `client_secret`, then use them in step 1 below.
 
 ## Migration Workflow
 
@@ -34,72 +33,35 @@ graph LR
     style End fill:#e8f5e9,stroke:#388e3c
 ```
 
-**1. Get an OAuth token**
+**1. Get an OAuth token** — `get-linear-token.sh`
 
 ```bash
-export LINEAR_CLIENT_ID=...
-export LINEAR_CLIENT_SECRET=...
+export LINEAR_CLIENT_ID=... LINEAR_CLIENT_SECRET=...
 ./get-linear-token.sh
-# follow the printed URL, paste the code back, then export the token it prints
+# or: ./get-linear-token.sh <client-id> <client-secret>
 ```
 
-**2. Find the list you want to import**
+Exchanges an OAuth authorization code for an access token with `actor=app`, which is what enables author attribution. The token cannot be copied out of Linear's settings the way a personal API key can — it has to come from this flow.
+
+The browser redirect to `http://localhost:8080/callback` will fail to load; that is expected. Copy the `code` parameter out of the address bar, paste it back into the script, then export the token it prints as `LINEAR_OAUTH_TOKEN`.
+
+Tokens are valid for 24 hours — re-run the script when the import reports an expired one.
+
+**2. Find the list you want to import** — `get-clickup-lists.sh`
 
 ```bash
 export CLICKUP_API_KEY=pk_...
 ./get-clickup-lists.sh
 ```
 
-**3. Import it**
-
-```bash
-./import-to-linear.sh ENG 901234567890
-```
-
-## Tools
-
-#### `get-linear-token.sh`
-
-**Purpose**: Exchange an OAuth authorization code for a Linear access token with `actor=app`, which is what enables author attribution on imported issues and comments.
-
-**Motivation**: The token cannot be copied from Linear's settings the way a personal API key can — it has to come out of the OAuth flow.
-
-Usage:
-
-```bash
-./get-linear-token.sh <client-id> <client-secret>
-# or with LINEAR_CLIENT_ID / LINEAR_CLIENT_SECRET set:
-./get-linear-token.sh
-```
-
-The browser redirect to `http://localhost:8080/callback` will fail to load — that is expected. Copy the `code` parameter out of the address bar and paste it back into the script.
-
-**Note**: Tokens are valid for 24 hours. Re-run the script when the import reports an expired token.
-
-#### `get-clickup-lists.sh`
-
-**Purpose**: List every ClickUp list the token can see, with its ID, so you know what to import.
-
-Usage:
-
-```bash
-./get-clickup-lists.sh
-```
-
-Output is one tab-separated line per list, so it pipes and greps cleanly:
+Prints every ClickUp list the token can see, one tab-separated line each, so it pipes and greps cleanly:
 
 ```
 901234567890	Acme / Engineering / Backend / Sprint 42 (37 tasks)
 901234567891	Acme / Engineering / Bugs (12 tasks)
 ```
 
-**Note**: Requires `CLICKUP_API_KEY`.
-
-#### `import-to-linear.sh`
-
-**Purpose**: Import every task from one or more ClickUp lists into a Linear team, with comments and metadata.
-
-Usage:
+**3. Import it** — `import-to-linear.sh`
 
 ```bash
 ./import-to-linear.sh <linear-team-key-or-id> <clickup-list-ids> [--open-only]
@@ -109,23 +71,22 @@ Usage:
 ./import-to-linear.sh ENG 901234567890 --open-only
 ```
 
-**Note**: Requires `CLICKUP_API_KEY` and `LINEAR_OAUTH_TOKEN`.
+Requires `CLICKUP_API_KEY` and `LINEAR_OAUTH_TOKEN`. By default everything in the list is imported, including done and closed tasks. Subtasks are included too — a ClickUp subtask becomes a Linear sub-issue of the same parent.
 
-By default everything in the list is imported, including done and closed tasks. Subtasks are included too — a ClickUp subtask becomes a Linear sub-issue of the same parent.
-
-## Common Options
+## Options
 
 | Option | Description |
 |---|---|
 | `--open-only` | Skip tasks whose status is `done` or `closed` |
+| `MAX_ATTACHMENT_BYTES` | Attachment size cap, default 100 MB |
 
 `--open-only` is applied twice over: `include_closed=false` keeps ClickUp from returning tasks in the Closed status, and tasks whose status *type* is `done` are then filtered out locally — ClickUp returns those either way, since `include_closed` only governs the Closed status itself.
 
 Watch out for one consequence: if an open subtask has a done parent, the parent is not imported and the subtask becomes a top-level issue. The run prints `! <task>: parent is not in the imported lists, creating without one` for each one.
 
-## Archived tasks
-
-Archived tasks are never imported, and archived lists, folders and spaces do not appear in `get-clickup-lists.sh`. In ClickUp, archived is distinct from closed — a closed task is one in a done-type status and *is* imported by default.
+```bash
+MAX_ATTACHMENT_BYTES=$((250 * 1024 * 1024)) ./import-to-linear.sh ENG 901234567890
+```
 
 ## What gets imported
 
@@ -144,6 +105,8 @@ Archived tasks are never imported, and archived lists, folders and spaces do not
 | Assignee | Assignee, matched by email |
 | Comments | Comments, with original author, avatar and timestamp |
 | — | The `Migrated` label, on every imported issue |
+
+Archived tasks are never imported, and archived lists, folders and spaces do not appear in `get-clickup-lists.sh`. In ClickUp, archived is distinct from closed — a closed task is one in a done-type status and *is* imported by default.
 
 ### Priority mapping
 
@@ -175,13 +138,7 @@ Matched against active Linear team members by email address. ClickUp supports mu
 
 Attachments are **copied into Linear**, not linked back to ClickUp: each file is downloaded, uploaded to Linear's storage via `fileUpload`, and then added to the issue's Links section. They keep working after the ClickUp workspace is shut down.
 
-Files larger than 100 MB are skipped, as is anything that fails to download or upload. Every skipped file is listed at the end of the run and stays available in ClickUp. Raise or lower the cap with `MAX_ATTACHMENT_BYTES`:
-
-```bash
-MAX_ATTACHMENT_BYTES=$((250 * 1024 * 1024)) ./import-to-linear.sh ENG 901234567890
-```
-
-Attachments on comments are not migrated — only attachments on the task itself.
+Files larger than `MAX_ATTACHMENT_BYTES` are skipped, as is anything that fails to download or upload. Every skipped file is listed at the end of the run and stays available in ClickUp. Attachments on comments are not migrated — only attachments on the task itself.
 
 ### Linking back to ClickUp
 
@@ -199,7 +156,3 @@ Every issue gets a "ClickUp" entry in its Links section pointing at the original
 ## Rate limits
 
 ClickUp allows roughly 100 requests/minute and Linear 2,500 requests/hour. The scripts back off and retry on HTTP 429, but a very large import can still exhaust the Linear hourly quota — if that happens, wait an hour and import the remaining lists separately.
-
-## License
-
-MIT
